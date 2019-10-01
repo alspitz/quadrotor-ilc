@@ -9,7 +9,7 @@ from lqr_gain_match.match_full_state import accel_to_euler_rpy
 
 class Quad3D(ILCBase):
   """
-    state is (pos, vel, z axis, angular velocity)
+    state is (pos, vel, rpy, angular velocity)
     control is (u, angular acceleration)
 
     #z_next = z + dt * [angvel]_x[:, 3]
@@ -20,6 +20,30 @@ class Quad3D(ILCBase):
   n_state = 12
   n_control = 4
   n_out = 3
+
+  state_labels = [
+    "Position X",
+    "Position Y",
+    "Position Z",
+    "Velocity X",
+    "Velocity Y",
+    "Velocity Z",
+    "Roll",
+    "Pitch",
+    "Yaw",
+    "Roll Velocity",
+    "Pitch Velocity",
+    "Yaw Velocity",
+  ]
+
+  control_labels = [
+    "Thrust",
+    "Roll Accel",
+    "Pitch Accel",
+    "Yaw Accel"
+  ]
+
+  g_vec = g3
 
   K_pos = np.array((
     (7.0, 0, 0, 4.0, 0, 0),
@@ -35,28 +59,103 @@ class Quad3D(ILCBase):
 
   control_normalization = np.array((1e-1, 1e-2, 1e-2, 1e-2))
 
-  use_snap = False
-
   def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+    ILCBase.__init__(self, **kwargs)
 
     self.model_drag = kwargs['model_drag']
     self.drag_dist = kwargs['drag_dist']
     self.thrust_dist = kwargs['thrust_dist']
 
-  def get_ABCD(self, state, control, dt):
+  def get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des):
     X = slice(0, 3)
     V = slice(3, 6)
-    Z = slice(6, 9)
+    RPY = slice(6, 9)
     OM = slice(9, 12)
     U = slice(0, 1)
     AA = slice(1, 4)
 
-    u = control[U][0]
-    rpy = state[Z]
+    pos = state[X]
+    vel = state[V]
+
+    rpy = state[RPY]
     angvel = state[OM]
     rot = Rotation.from_euler('ZYX', rpy[::-1])
     z = rot.apply(np.array((0, 0, 1)))
+
+    roll, pitch, yaw = rpy
+
+    dzdrpy = np.array((
+      (np.sin(yaw) * np.cos(roll) - np.sin(roll) * np.cos(yaw) * np.sin(pitch), np.cos(roll) * np.cos(yaw) * np.cos(pitch), np.sin(roll) * np.cos(yaw) - np.cos(roll) * np.sin(yaw) * np.sin(pitch)),
+      (-np.sin(roll) * np.sin(yaw) * np.sin(pitch) - np.cos(yaw) * np.cos(roll), np.cos(roll) * np.sin(yaw) * np.cos(pitch), np.cos(roll) * np.cos(yaw) * np.sin(pitch) + np.sin(yaw) * np.sin(roll)),
+      (-np.cos(pitch) * np.sin(roll), -np.sin(pitch) * np.cos(roll), 0)
+    ))
+
+    skew_z = math_utils.skew_matrix(z)
+
+    pos_vel = state[:6]
+    accel_des = -self.K_pos.dot(pos_vel - np.hstack((pos_des, vel_des))) + acc_des + g3
+    adota = accel_des.T.dot(accel_des)
+    u = np.sqrt(adota)
+
+    K_x = np.zeros((self.n_control, self.n_state))
+
+    adir = accel_des / u
+
+    dadx = -self.K_pos[:, X]
+    dadv = -self.K_pos[:, V]
+
+    dudx = adir.dot(dadx)
+    dudv = adir.dot(dadv)
+
+    K_x[U, X] = dudx
+    K_x[U, V] = dudv
+
+    dzdx = (u * dadx - np.outer(accel_des, dudx)) / adota
+    dzdv = (u * dadv - np.outer(accel_des, dudv)) / adota
+
+    z = adir
+    deulerdz = np.zeros((3, 3))
+    a1 = 1 / np.sqrt(1 - z[1] ** 2)
+    deulerdz[0, 1] = -a1
+    deulerdz[1, 0] = 1 / np.sqrt(1 - (z[0] * a1) ** 2)
+    deulerdz[1, 1] = z[0] * z[1] / (np.sqrt(1 - (z[0] * a1) ** 2) * ((1 - z[1]**2) ** (3/2)))
+
+    K_x[AA, X] = self.K_att[:, :3].dot(deulerdz.dot(dzdx))
+    K_x[AA, V] = self.K_att[:, :3].dot(deulerdz.dot(dzdv))
+
+    K_x[AA, RPY] = -self.K_att[:, :3]
+    K_x[AA, OM] = -self.K_att[:, 3:6]
+
+    return K_x
+
+  def get_ABCD(self, state, control, dt):
+    X = slice(0, 3)
+    V = slice(3, 6)
+    RPY = slice(6, 9)
+    OM = slice(9, 12)
+    U = slice(0, 1)
+    AA = slice(1, 4)
+
+    rpy = state[RPY]
+    angvel = state[OM]
+    rot = Rotation.from_euler('ZYX', rpy[::-1])
+    z = rot.apply(np.array((0, 0, 1)))
+
+    if not self.use_feedback:
+      u = control[U][0]
+    else:
+      pos_vel = state[:6]
+      accel_des = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g3
+      adota = accel_des.T.dot(accel_des)
+      u = np.sqrt(adota)
+
+    roll, pitch, yaw = rpy
+
+    dzdrpy = np.array((
+      (np.sin(yaw) * np.cos(roll) - np.sin(roll) * np.cos(yaw) * np.sin(pitch), np.cos(roll) * np.cos(yaw) * np.cos(pitch), np.sin(roll) * np.cos(yaw) - np.cos(roll) * np.sin(yaw) * np.sin(pitch)),
+      (-np.sin(roll) * np.sin(yaw) * np.sin(pitch) - np.cos(yaw) * np.cos(roll), np.cos(roll) * np.sin(yaw) * np.cos(pitch), np.cos(roll) * np.cos(yaw) * np.sin(pitch) + np.sin(yaw) * np.sin(roll)),
+      (-np.cos(pitch) * np.sin(roll), -np.sin(pitch) * np.cos(roll), 0)
+    ))
 
     A = np.zeros((self.n_state, self.n_state))
     B = np.zeros((self.n_state, self.n_control))
@@ -67,12 +166,15 @@ class Quad3D(ILCBase):
     A[V, V] = np.eye(3)
     A[X, V] = dt * np.eye(3)
 
-    A[Z, Z] = np.eye(3)
+    A[RPY, RPY] = np.eye(3)
     A[OM, OM] = np.eye(3)
 
-    A[V, Z] = u * dt * np.eye(3)
-    # TODO Need to fix this because om is in the body frame!
-    A[Z, OM] = -dt * math_utils.skew_matrix(z)
+    A[V, RPY] = u * dt * dzdrpy
+    # Below taken from Tal and Karaman 2018 - Accurate Tracking of ...
+    A[RPY, OM] = dt * np.array((
+      (1, np.sin(roll) * np.tan(pitch), np.cos(roll) * np.tan(pitch)),
+      (0, np.cos(roll), -np.sin(roll)),
+      (0, np.sin(roll) / np.cos(pitch), np.cos(roll) / np.cos(pitch))))
 
     B[V, U] = dt * np.array([z]).T
     B[OM, AA] = dt * np.eye(3)
@@ -87,30 +189,9 @@ class Quad3D(ILCBase):
     C[X, X] = np.eye(3)
 
     if self.use_feedback:
-      K_x = np.zeros((self.n_control, self.n_state))
+      K_x = self.get_feedback_response(state, self.pos_des, self.vel_des, self.acc_des, self.jerk_des, self.snap_des)
+
       K_u = np.zeros((self.n_control, self.n_control))
-
-      pos_vel = state[:6]
-      a = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g3
-      adota = a.T.dot(a)
-      adir = a / np.sqrt(adota)
-
-      K_x[U, X] = adir.dot(-self.K_pos[:, X])
-      K_x[U, V] = adir.dot(-self.K_pos[:, V])
-
-      #print(np.cos(rpy[0]) * np.sin(rpy[1]), -np.sin(rpy[0]), np.cos(rpy[1]) * np.cos(rpy[0]))
-      #print(z.T)
-      #input()
-
-      deulerdz = np.zeros((3, 3))
-      a1 = 1 / np.sqrt(1 - z[1] ** 2)
-      deulerdz[0, 1] = -a1
-      deulerdz[1, 0] = 1 / np.sqrt(1 - (z[0] * a1) ** 2)
-      deulerdz[1, 1] = z[0] * z[1] / (np.sqrt(1 - (z[0] * a1) ** 2) * ((1 - z[1]**2) ** (3/2)))
-
-      K_x[AA, Z] = -self.K_att[:3, :3].dot(deulerdz)
-      K_x[AA, OM] = -self.K_att[:3, 3:6]
-
       K_u[U, U] = 1
       K_u[AA, AA] = np.eye(3)
 
@@ -143,12 +224,6 @@ class Quad3D(ILCBase):
     ang_acc_body = np.array((dp, dq, 0))
 
     ang_vel_body = np.array((ang_vel.dot(x_b), ang_vel.dot(y_b), ang_vel.dot(z_b)))
-
-    # TODO HMM XXX
-    if self.use_feedback:
-      u = g
-      if self.use_snap:
-        ang_acc_body *= 0
 
     state = np.hstack((pos, vel, z_b, ang_vel_body))
     control = np.hstack((u, ang_acc_body))
@@ -207,7 +282,7 @@ class Quad3D(ILCBase):
 
     return np.array(xs)
 
-  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, u_ff, angaccel_des, **kwargs):
+  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ff, angaccel_ff, **kwargs):
     pos_vel = x[:6]
     rpy = x[6:9]
     ang_vel = x[9:]
@@ -229,4 +304,4 @@ class Quad3D(ILCBase):
     euler_angvel = np.hstack((euler_error, angvel_error))
     u_ang_accel = -self.K_att.dot(euler_angvel) + angaccel_des
 
-    return np.hstack((u_accel + u_ff - g, u_ang_accel))
+    return np.hstack((u_accel + u_ff, u_ang_accel + angaccel_ff))

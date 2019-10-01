@@ -12,8 +12,6 @@ class Quad3DFL(Quad3D):
   int_u = g
   int_udot = 0
 
-  use_snap = True
-
   def __init__(self, **kwargs):
     super().__init__(**kwargs)
 
@@ -27,7 +25,6 @@ class Quad3DFL(Quad3D):
   def get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des):
     X = slice(0, 3)
     V = slice(3, 6)
-    Z = slice(6, 9)
     RPY = slice(6, 9)
     OM = slice(9, 12)
     U = slice(0, 1)
@@ -120,7 +117,6 @@ class Quad3DFL(Quad3D):
   def get_ABCD(self, state, control, dt):
     X = slice(0, 3)
     V = slice(3, 6)
-    Z = slice(6, 9)
     RPY = slice(6, 9)
     OM = slice(9, 12)
     U = slice(0, 1)
@@ -129,7 +125,9 @@ class Quad3DFL(Quad3D):
     pos = state[X]
     vel = state[V]
 
-    u = control[U][0]
+    ind = self.iter - 1 if self.iter >= len(self.zs) - 1 else self.iter
+    u, udot = self.zs[ind]
+
     rpy = state[RPY]
     angvel = state[OM]
     rot = Rotation.from_euler('ZYX', rpy[::-1])
@@ -154,7 +152,7 @@ class Quad3DFL(Quad3D):
     A[V, V] = np.eye(3)
     A[X, V] = dt * np.eye(3)
 
-    A[Z, Z] = np.eye(3)
+    A[RPY, RPY] = np.eye(3)
     A[OM, OM] = np.eye(3)
 
     #A[V, Z] = u * dt * np.eye(3)
@@ -184,21 +182,6 @@ class Quad3DFL(Quad3D):
       K_x = np.zeros((self.n_control, self.n_state))
       K_u = np.zeros((self.n_control, self.n_control))
 
-      pos_vel = state[:6]
-      a = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g3
-      adota = a.T.dot(a)
-      adir = a / np.sqrt(adota)
-
-      #K_x[U, X] = adir.dot(-self.K_pos[:, X])
-      #K_x[U, V] = adir.dot(-self.K_pos[:, V])
-
-      #print(np.cos(rpy[0]) * np.sin(rpy[1]), -np.sin(rpy[0]), np.cos(rpy[1]) * np.cos(rpy[0]))
-      #print(z.T)
-      #input()
-
-      ind = self.iter - 1 if self.iter >= len(self.zs) - 1 else self.iter
-      u, udot = self.zs[ind]
-
       oldu = self.int_u
       oldudot = self.int_udot
 
@@ -218,8 +201,7 @@ class Quad3DFL(Quad3D):
 
     return A, B, C, D
 
-
-  def feedback(self, x, pos_des, vel_des, acc_des, jerk_des, snap_des, u_ff, angaccel_des, integrate=True):
+  def feedback(self, x, pos_des, vel_des, acc_des, jerk_des, snap_des, u_ff, angaccel_ff, integrate=True):
     pos = x[:3]
     vel = x[3:6]
     rpy = x[6:9]
@@ -268,9 +250,9 @@ class Quad3DFL(Quad3D):
     angaccel_cross_z = z_ddot - np.cross(ang_vel_w, z_b_dot_act)
 
     ang_acc_world = np.cross(z_b_act, angaccel_cross_z)
-    ang_acc_body = rot.inv().apply(ang_acc_world) + angaccel_des
+    ang_acc_body = rot.inv().apply(ang_acc_world) + angaccel_ff
 
-    u_ret = self.int_u + u_ff - g
+    u_ret = self.int_u + u_ff
 
     if integrate:
       self.int_u += self.int_udot * self.dt + 0.5 * v1 * self.dt ** 2

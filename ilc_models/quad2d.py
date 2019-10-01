@@ -11,15 +11,29 @@ class Quad2D(ILCBase):
   n_control = 2
   n_out = 2
 
-  control_normalization = np.array((1e-1, 1e-3))
+  state_labels = [
+    "Position X",
+    "Position Z",
+    "Velocity X",
+    "Velocity Z",
+    "Roll",
+    "Roll Velocity"
+  ]
+
+  control_labels = [
+    "Thrust",
+    "Roll Accel"
+  ]
+
+  g_vec = g2
+
+  control_normalization = np.array((1e-1, 1e-2))
 
   K_pos = np.array((
-    (8, 0, 16, 0),
-    (0, 8, 0, 4)
-  )) / 4
-  K_att = np.array((200, 60))
-
-  use_snap = False
+    (7, 0, 4, 0),
+    (0, 7, 0, 4)
+  ))
+  K_att = np.array((120, 16))
 
   def __init__(self, **kwargs):
     super().__init__(**kwargs)
@@ -36,7 +50,14 @@ class Quad2D(ILCBase):
     AA = slice(1, 2)
 
     theta = state[TH][0]
-    u = control[U][0]
+
+    if not self.use_feedback:
+      u = control[U][0]
+    else:
+      pos_vel = state[:4]
+      accel_des = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g2
+      adota = accel_des.T.dot(accel_des)
+      u = np.sqrt(adota)
 
     ct = np.cos(theta)
     st = np.sin(theta)
@@ -62,16 +83,13 @@ class Quad2D(ILCBase):
       K_x = np.zeros((self.n_control, self.n_state))
       K_u = np.zeros((self.n_control, self.n_control))
 
-      pos_vel = state[:4]
-      a = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g2
-      adota = a.T.dot(a)
-      adir = a / np.sqrt(adota)
+      adir = accel_des / u
 
       K_x[U, X] = adir.dot(-self.K_pos[:, X])
       K_x[U, V] = adir.dot(-self.K_pos[:, V])
 
-      K_x[AA, X] = self.K_att[0] * (a[1] * self.K_pos[0, X] - a[0] * self.K_pos[1, X]) / adota
-      K_x[AA, V] = self.K_att[0] * (a[1] * self.K_pos[0, V] - a[0] * self.K_pos[1, V]) / adota
+      K_x[AA, X] = self.K_att[0] * (accel_des[1] * self.K_pos[0, X] - accel_des[0] * self.K_pos[1, X]) / adota
+      K_x[AA, V] = self.K_att[0] * (accel_des[1] * self.K_pos[0, V] - accel_des[0] * self.K_pos[1, V]) / adota
       K_x[AA, TH] = -self.K_att[0]
       K_x[AA, OM] = -self.K_att[1]
 
@@ -83,7 +101,7 @@ class Quad2D(ILCBase):
 
     return A, B, C, D
 
-  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, u_ff, angaccel_des):
+  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ff, angaccel_ff, **kwargs):
     pos_vel = x[:4]
     theta = x[4]
     angvel = x[5]
@@ -97,7 +115,7 @@ class Quad2D(ILCBase):
     angvel_error = angvel - angvel_des
     u_ang_accel = -self.K_att.dot(np.hstack((theta_err, angvel_error))) + angaccel_des
 
-    return np.hstack((a_norm + u_ff - g, u_ang_accel,))
+    return np.hstack((a_norm + u_ff, u_ang_accel + angaccel_ff))
 
   def feedforward(self, pos, vel, acc, jerk, snap):
     acc_vec = acc + g2
@@ -113,12 +131,6 @@ class Quad2D(ILCBase):
     theta = np.arctan2(-z_b[0], z_b[1])
     ang_vel = np.cross(z_b, z_b_dot)
     ang_acc = np.cross(z_b, z_b_ddot)
-
-    # TODO HMM XXX
-    if self.use_feedback:
-      u = g
-      if self.use_snap:
-        ang_acc *= 0
 
     state = np.array((pos[0], pos[1], vel[0], vel[1], theta, ang_vel))
     control = np.array((u, ang_acc))

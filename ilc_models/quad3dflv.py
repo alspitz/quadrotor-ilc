@@ -15,12 +15,36 @@ class Quad3DFLV(Quad3DFL):
   n_control = 4
   n_out = 3
 
+  state_labels = [
+    "Position X",
+    "Position Y",
+    "Position Z",
+    "Velocity X",
+    "Velocity Y",
+    "Velocity Z",
+    "Roll",
+    "Pitch",
+    "Yaw",
+    "Roll Velocity",
+    "Pitch Velocity",
+    "Yaw Velocity",
+    "Thrust",
+    "Thrust Velocity"
+  ]
+
+  control_labels = [
+    "Thrust Accel",
+    "Roll Accel",
+    "Pitch Accel",
+    "Yaw Accel"
+  ]
+
+
   control_normalization = np.array((1e-4, 1e-2, 1e-2, 1e-2))
 
   def get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des):
     X = slice(0, 3)
     V = slice(3, 6)
-    Z = slice(6, 9)
     RPY = slice(6, 9)
     OM = slice(9, 12)
     Z1 = slice(12, 13)

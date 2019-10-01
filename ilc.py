@@ -49,6 +49,7 @@ if __name__  == "__main__":
   parser.add_argument("--no-relin-time", default=False, dest='relin_time', action='store_false')
   parser.add_argument("--no-relin-iter", default=False, dest='relin_iter', action='store_false')
   parser.add_argument("--dist", default=1.5, type=float, help="Distance to travel.")
+  parser.add_argument("--rest-time", default=0.0, type=float, help="Rest time to add to end of desired trajectory.")
   parser.add_argument("--feedforward", "--ff", default=False, action='store_true', help="Use initial feedforward trajectory.")
   parser.add_argument("--thrust-dist", default=1.0, type=float, help="Disturbance used to scale the commanded thrust u.")
   parser.add_argument("--drag-dist", default=0.0, type=float, help="Disturbance used to scale velocity subtracted from acceleration as drag.")
@@ -97,15 +98,16 @@ if __name__  == "__main__":
 
   assert args.feedback or (not args.plot_fb_resp)
 
-  dt = args.dt
-  t_end = 1.0
-  end_pos = args.dist
-
   ilc_c, DIMS = system_map[args.system]
-
+  ilc = ilc_c(feedback=args.feedback, drag_dist=args.drag_dist, thrust_dist=args.thrust_dist, model_drag=args.model_drag, dt=args.dt)
   AXIS = 1 if DIMS == 3 else 0
 
-  ilc = ilc_c(feedback=args.feedback, drag_dist=args.drag_dist, thrust_dist=args.thrust_dist, model_drag=args.model_drag, dt=args.dt)
+  dt = args.dt
+  poly_tend = 1.0
+  t_end = poly_tend + args.rest_time
+
+  poly_N = int(round(poly_tend / dt))
+  poly_ts = np.linspace(0, poly_tend, poly_N + 1)
 
   N = int(round(t_end / dt))
   ts = np.linspace(0, t_end, N + 1)
@@ -115,33 +117,40 @@ if __name__  == "__main__":
 
   print("No. of steps is", N)
 
-  pos_poly = get_poly(0, end_pos=end_pos, duration=t_end)
-  poss_des = np.polyval(pos_poly, ts)
+  def pad_des(des, val=0):
+    """ Returns a desired vectory spanning the full length of time
+        i.e. adds the rest time in addition to the poly traj time """
+    return np.hstack((des, val * np.ones(N - poly_N)))
 
-  vels_des = np.polyval(np.polyder(pos_poly), ts)
+  pos_poly = get_poly(0, end_pos=args.dist, duration=poly_tend)
+  vel_poly = np.polyder(pos_poly)
+  acc_poly = np.polyder(vel_poly)
+  jerk_poly = np.polyder(acc_poly)
+  snap_poly = np.polyder(jerk_poly)
+
+  poss_des = np.polyval(pos_poly, poly_ts)
+  poss_des = pad_des(poss_des, args.dist)
+
+  vels_des = np.polyval(vel_poly, poly_ts)
+  vels_des = pad_des(vels_des)
+
   vels_des_vec = np.zeros((N + 1, DIMS))
   vels_des_vec[:, AXIS] = vels_des
 
-  acc_poly = np.polyder(np.polyder(pos_poly))
-  accels_des = np.polyval(acc_poly, ts)
-
-  jerk_poly = np.polyder(acc_poly)
-  snap_poly = np.polyder(jerk_poly)
-  jerks_des = np.polyval(jerk_poly, ts)
-  snaps_des = np.polyval(snap_poly, ts)
+  accels_des = pad_des(np.polyval(acc_poly, poly_ts))
+  jerks_des = pad_des(np.polyval(jerk_poly, poly_ts))
+  snaps_des = pad_des(np.polyval(snap_poly, poly_ts))
 
   lifted_control = np.zeros(N * ilc.n_control)
-  if DIMS == 2 or DIMS == 3:
+  if (DIMS == 2 or DIMS == 3) and not args.feedback:
     lifted_control[::ilc.n_control] = base.g
 
   cum_updates = np.zeros(lifted_control.shape)
 
-  lifted_state = np.zeros(N * ilc.n_state)
-  if DIMS == 3:
-    lifted_state[8::ilc.n_state] = 1.0
-
   if args.feedforward:
     assert hasattr(ilc, 'feedforward')
+
+    ff_states = []
 
     for i in range(N):
       hods = [poss_des[i], vels_des[i], accels_des[i], jerks_des[i], snaps_des[i]]
@@ -152,10 +161,10 @@ if __name__  == "__main__":
         hod_vecs.append(vec)
 
       state, control = ilc.feedforward(*hod_vecs)
-      lifted_state[ilc.n_state * i : ilc.n_state * (i + 1)] = state
-      lifted_control[ilc.n_control * i : ilc.n_control * (i + 1)] = control
+      ff_states.append(state)
+      if not args.feedback:
+        lifted_control[ilc.n_control * i : ilc.n_control * (i + 1)] = control
 
-  initial_lifted_state = lifted_state.copy()
   initial_lifted_control = lifted_control.copy()
 
   if args.system in ['2dpos', 'linearpos', '2dposlin', 'nl1d'] or '3d' in args.system:
@@ -178,7 +187,7 @@ if __name__  == "__main__":
   snaps_des_vec[:, AXIS] = snaps_des
 
   class Controller:
-    def __init__(self, lifted_control, lifted_state, poss_des, vels_des, accels_des, jerks_des, snaps_des):
+    def __init__(self, lifted_control, poss_des, vels_des, accels_des, jerks_des, snaps_des):
       self.poss_des = poss_des
       self.vels_des = vels_des
 
@@ -187,52 +196,47 @@ if __name__  == "__main__":
       self.jerks_des = []
       self.snaps_des = []
       self.angvels_des = []
-
-      if args.system in ['linear', 'linearpos']:
-        control_j = dt * np.cumsum(lifted_control)
-        control_a = dt * np.cumsum(control_j)
+      self.angaccels_des = []
 
       for i in range(N):
         self.controls.append(lifted_control[ilc.n_control * i : ilc.n_control * (i + 1)])
 
-        state_now = lifted_state[ilc.n_state * i : ilc.n_state * (i + 1)]
+        accel = accels_des[i, :]
+        jerk = jerks_des[i, :]
+        snap = snaps_des[i, :]
 
-        self.jerks_des.append(jerks_des[i, :])
-        self.snaps_des.append(snaps_des[i, :])
+        self.accs_des.append(accel)
+        if args.feedforward:
+          self.jerks_des.append(jerk)
+          self.snaps_des.append(snaps_des[i, :])
+        else:
+          self.jerks_des.append(jerk * 0)
+          self.snaps_des.append(snaps_des[i, :] * 0)
 
-        if args.system == 'simple' or args.system == 'trivial':
-          pass
+        if args.system in ['linear', 'linearpos']:
+          self.angvels_des.append(jerk)
 
-        elif args.system in ['linear', 'linearpos']:
-          _, _, theta, angvel = state_now
-          #theta = control_a[i]
-          #angvel = control_j[i]
-          self.accs_des.append(theta)
-          self.angvels_des.append(angvel)
-
-        elif '2d' in args.system:
-          px, pz, vx, vz, theta, angvel = state_now
-          accel = accels_des[i, :]
-          self.accs_des.append(accel)
-          self.angvels_des.append(angvel)
-
-        elif '3d' in args.system:
-          accel = accels_des[i, :]
-
-          acc_vec = accel + base.g3
+        elif '2d' in args.system or '3d' in args.system:
+          acc_vec = accel + ilc.g_vec
           u = np.linalg.norm(acc_vec)
-          jerk = jerks_des[i, :]
 
           if u < 1e-3:
             print("WARNING: acc norm too low!")
 
           z_b      = (1.0 / u) * acc_vec
           z_b_dot  = (1.0 / u) * (jerk - z_b.dot(jerk) * z_b)
+          z_b_ddot = (1.0 / u) * (snap - (snap.dot(z_b) + jerk.dot(z_b_dot)) * z_b - 2 * jerk.dot(z_b) * z_b_dot)
 
+          theta = np.arctan2(-z_b[0], z_b[1])
           angvel = np.cross(z_b, z_b_dot)
+          angacc = np.cross(z_b, z_b_ddot)
 
-          self.accs_des.append(accel)
-          self.angvels_des.append(angvel)
+          if args.feedforward:
+            self.angvels_des.append(angvel)
+            self.angaccels_des.append(angacc)
+          else:
+            self.angvels_des.append(angvel * 0)
+            self.angaccels_des.append(angacc * 0)
 
       self.index = 0
 
@@ -272,6 +276,7 @@ if __name__  == "__main__":
             self.vels_des[self.index],
             self.accs_des[self.index],
             self.angvels_des[self.index],
+            self.angaccels_des[self.index],
             ilc_controls[0],
             ilc_controls[1:]
           ]
@@ -372,38 +377,38 @@ if __name__  == "__main__":
   trial_control_corrections = []
 
   for iter_no in range(args.trials):
-    controller = Controller(lifted_control, lifted_state, poss_des_vec, vels_des_vec, accels_des_vec, jerks_des_vec, snaps_des_vec)
-    controller.compute_feedback_response = iter_no == args.trials - 1 and (args.plot_fb_resp or args.save)
+    controller = Controller(lifted_control, poss_des_vec, vels_des_vec, accels_des_vec, jerks_des_vec, snaps_des_vec)
+    controller.compute_feedback_response = iter_no == args.trials - 1 and args.feedback and (args.plot_fb_resp or args.save)
     controller.poke = iter_no == args.trials - 1 and args.poke
     ilc.reset()
     data = ilc.simulate(t_end, controller.get, dt=dt)
 
     if '3d' in args.system:
       poss_vec = data[:, :3]
-      accels_vec = np.diff(data[:, 3:6], axis=0) / dt
+      vels = data[:, 3:6]
+      trial_vels.append(vels)
+      accels_vec = np.diff(vels, axis=0) / dt
       accels_vec = np.vstack((accels_vec, np.zeros(3)))
-      rpys = data[:, 6:9]
-      ang_body = data[:, 9:12]
-
-      trial_rpys.append(rpys)
-      trial_omegas.append(ang_body)
+      trial_rpys.append(data[:, 6:9])
+      trial_omegas.append(data[:, 9:12])
 
     elif '2d' in args.system:
       poss_vec = data[:, :2]
       vels = data[:, 2:4]
-      accels_vec = np.diff(data[:, 2:4], axis=0) / dt
+      trial_vels.append(vels)
+      accels_vec = np.diff(vels, axis=0) / dt
       accels_vec = np.vstack((accels_vec, np.zeros(2)))
-      thetas = data[:, 4]
-      angs = data[:, 5]
+      trial_rpys.append(data[:, 4:5])
+      trial_omegas.append(data[:, 5:6])
 
     elif args.system in ['linear', 'linearpos', 'nl1d']:
       poss_vec = data[:, 0:1]
       vels = data[:, 1:2]
-      accels_vec = np.diff(data[:, 1:2], axis=0) / dt
+      trial_vels.append(vels)
+      accels_vec = np.diff(vels, axis=0) / dt
       accels_vec = np.vstack((accels_vec, 0))
-      #accels_vec = data[:, 2:3]
-      thetas = data[:, 2]
-      angs = data[:, 3]
+      trial_rpys.append(data[:, 2:3])
+      trial_omegas.append(data[:, 3:4])
 
     elif args.system == 'simple':
       poss_vec = data[:, 0:1]
@@ -425,17 +430,13 @@ if __name__  == "__main__":
     print(title_s)
     print("============")
     print("Avg. pos error:", np.mean(abs_pos_errors))
+    print("Avg. Y   error:", np.mean(abs_pos_errors[:, AXIS]))
     print("Max. pos error:", np.max(abs_pos_errors))
     #print("Avg. acc error:", np.mean(abs_accel_errors))
     #print("Max. acc error:", np.max(abs_accel_errors))
 
     trial_poss.append(poss_vec)
-    if args.system in ['linear', 'linearpos', 'nl1d', '2dpos', '2dposlin']:
-      trial_vels.append(vels)
-
     trial_accels.append(accels_vec)
-    if args.system  in ['linear', '2d', '2dpos']:
-      trial_omegas.append(angs[:, np.newaxis])
 
     trial_controls.append(np.array(controller.final_controls))
     trial_control_corrections.append(lifted_control.copy())
@@ -455,7 +456,7 @@ if __name__  == "__main__":
         state = data[ind, :]
         control = lifted_control[ilc.n_control * ind : ilc.n_control * (ind + 1)]
       else:
-        state = initial_lifted_state[ilc.n_state * ind : ilc.n_state * (ind + 1)]
+        state = ff_states[ind]
         control = initial_lifted_control[ilc.n_control * ind : ilc.n_control * (ind + 1)]
 
       states.append(state)
@@ -484,15 +485,11 @@ if __name__  == "__main__":
     min_norm_mat = np.diag(np.tile(ilc.control_normalization, N))
     F = np.vstack((calCBpD, args.w * min_norm_mat))
     y = np.hstack((lifted_output_error, np.zeros(calCBpD.shape[1])))
-    #update, _, _, _ = np.linalg.lstsq(calCBpD, lifted_output_error, rcond=None)
     update, _, _, _ = np.linalg.lstsq(F, -y, rcond=None)
 
-    #n_ignore = 0
-    #update[:ilc.n_control * n_ignore] = np.zeros(ilc.n_control * n_ignore)
-
     update *= args.alpha
-    new_lifted_control = lifted_control + update
 
+    lifted_control += update
     cum_updates += update
 
     if args.plot_updates:
@@ -514,22 +511,13 @@ if __name__  == "__main__":
 
       plt.show()
 
-    #print(lifted_control)
-    #print(calCBpD)
-    #print(lifted_output_error)
-    #print(update)
-    #input()
-    #print(new_lifted_control)
-
-    lifted_control = new_lifted_control
-
   start_color = np.array((1, 0, 0, 0.5))
   end_color = np.array((0, 1, 0, 0.5))
 
   def plot_trials(datas, desired, title, ylabel):
     axes = "XYZ" if DIMS == 3 else "XZ" if DIMS == 2 else "X"
     #for axis in [AXIS]:
-    for axis in range(DIMS):
+    for axis in range(datas[0].shape[1]):
       for i, trial_data in enumerate(datas):
         if np.linalg.norm(trial_data[:, axis]) > 1e-8:
           break
@@ -574,16 +562,17 @@ if __name__  == "__main__":
       suffix = "%02d.txt" % i
       np.savetxt(os.path.join(dirname, "pos" + suffix), trial_poss[i], delimiter=',')
 
-      if '3d' in args.system:
+      if '3d' in args.system or '2d' in args.system:
         np.savetxt(os.path.join(dirname, "rpy" + suffix), trial_rpys[i], delimiter=',')
         np.savetxt(os.path.join(dirname, "angvel" + suffix), trial_omegas[i], delimiter=',')
 
       np.savetxt(os.path.join(dirname, "control-corrections" + suffix), trial_control_corrections[i], delimiter=',')
       np.savetxt(os.path.join(dirname, "controls" + suffix), trial_controls[i], delimiter=',')
 
-    resp = np.array((controller.feedback_responses))
-    for i in range(resp.shape[1]):
-      np.savetxt(os.path.join(dirname, "fbresp%01d.txt" % i), resp[:, i, :], delimiter=',')
+    if args.feedback:
+      resp = np.array((controller.feedback_responses))
+      for i in range(resp.shape[1]):
+        np.savetxt(os.path.join(dirname, "fbresp%01d.txt" % i), resp[:, i, :], delimiter=',')
 
     latest_dir = os.path.join("data", "latest")
     if os.path.exists(latest_dir):
@@ -597,9 +586,9 @@ if __name__  == "__main__":
     #plot_trials(trial_vels, vels_des_vec, "Velocity", "Vel. %s (m/s)")
     #plot_trials(trial_accels, accels_des_vec, "Acceleration", "Accel. %s (m/s^2)")
 
-    if '3d' in args.system:
-      #plot_trials(trial_omegas, np.zeros((N + 1, DIMS)), "Angular Velocity", "$\omega$ %s (rad/s)")
-      plot_trials(trial_rpys, np.zeros((N + 1, DIMS)), "Angle", "$\\alpha$ %s (rad/s^2)")
+    if '3d' in args.system or '2d' in args.system:
+      plot_trials(trial_omegas, None, "Angular Velocity", "$\omega$ %s (rad/s)")
+      plot_trials(trial_rpys, None, "Angle", "$\\alpha$ %s (rad/s^2)")
 
   if args.plot_control_corrections:
     for j in range(ilc.n_control):
@@ -657,30 +646,12 @@ if __name__  == "__main__":
     resp = np.array((controller.feedback_responses))
     resp_ana = np.array((controller.feedback_responses_ana))
 
-    controlvars = [
-      ("u", 0),
-      ("Roll Accel", 1)
-    ]
+    for i, tit in enumerate(ilc.state_labels):
+      for j, ctit in enumerate(ilc.control_labels):
 
-    fbrespvars = [
-      ("Position Y", 1),
-      ("Position Z", 2),
-      ("Velocity Y", 4),
-      ("Velocity Z", 5),
-      ("Roll", 6),
-      ("Roll Velocity", 9)
-    ]
+        if np.linalg.norm(resp[:, j, i]) < 1e-4 and (not len(resp_ana) or np.linalg.norm(resp_ana[:, j, i]) < 1e-6):
+          continue
 
-    augmented_vars = [
-      ("u", 12),
-      ("$\dot u$", 13)
-    ]
-
-    if args.system == '3ddediv':
-      fbrespvars += augmented_vars
-
-    for tit, i in fbrespvars:
-      for ctit, j in controlvars:
         plt.figure()
         plt.plot(ts[:-1], resp[:, j, i], label='d%d / d%d' % (j, i))
         if len(resp_ana):
