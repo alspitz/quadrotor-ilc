@@ -43,6 +43,7 @@ if __name__  == "__main__":
   parser.add_argument("--dt", type=float, default=0.02, help="Size of timestep along trajectory.")
   parser.add_argument("--feedback", default=False, action='store_true', help="Apply feedback along the trajectory.")
   parser.add_argument("--noise", default=False, action='store_true', help="Add noise to the position errors fed into ILC.")
+  parser.add_argument("--noise-stddev", default=1e-3, type=float, help="Stddev of noise added to the position errors")
   parser.add_argument("--filter", default=False, action='store_true', help="Filter the position errors fed into ILC.")
   parser.add_argument("--relin-time", default=True, action='store_true', help="Use a different linearization point at each time step along the trajectory.")
   parser.add_argument("--relin-iter", default=True, action='store_true', help="Use different linearization points for each iteration.")
@@ -466,7 +467,7 @@ if __name__  == "__main__":
 
     if args.noise:
       for i in range(len(pos_errors)):
-        pos_errors[i] += np.random.normal(0, 0.001)
+        pos_errors[i] += np.random.normal(0, args.noise_stddev)
 
     lifted_output_error = np.zeros((ilc.n_out * N))
     for i in range(N):

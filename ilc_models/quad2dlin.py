@@ -12,6 +12,8 @@ class Quad2DLin(ILCBase):
 
   control_normalization = np.array((1e-1, 1e-3))
 
+  g_vec = g2
+
   def get_ABCD(self, state, control, dt):
     X = slice(0, 2)
     V = slice(2, 4)
