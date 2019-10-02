@@ -93,7 +93,7 @@ class Quad3DFLV(Quad3DFL):
     K_x[V1, Z1] = dv1du
     K_x[V1, Z2] = dv1dudot
 
-    fb_resp = super().get_feedback_response(state, pos_des, vel_des, acc_des, jerk_des, snap_des)
+    fb_resp = Quad3DFL.get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des)
 
     K_x[AA, X] = fb_resp[AA, X]
     K_x[AA, V] = fb_resp[AA, V]

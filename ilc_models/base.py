@@ -9,6 +9,7 @@ class ILCBase:
 
   def __init__(self, **kwargs):
     self.use_feedback = kwargs['feedback']
+    self.reset()
 
   def reset(self):
     pass

@@ -13,7 +13,7 @@ class Quad3DFL(Quad3D):
   int_udot = 0
 
   def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+    Quad3D.__init__(self, **kwargs)
 
     self.dt = kwargs['dt']
 
