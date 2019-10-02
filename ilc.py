@@ -218,15 +218,25 @@ if __name__  == "__main__":
           self.angvels_des.append(jerk)
 
         elif '2d' in args.system or '3d' in args.system:
-          acc_vec = accel + ilc.g_vec
+          if args.model_drag:
+            drag_dist_control = args.drag_dist
+          else:
+            drag_dist_control = 0
+
+          acc_vec = accel + ilc.g_vec + drag_dist_control * vels_des[i]
           u = np.linalg.norm(acc_vec)
 
           if u < 1e-3:
             print("WARNING: acc norm too low!")
 
+
           z_b      = (1.0 / u) * acc_vec
-          z_b_dot  = (1.0 / u) * (jerk - z_b.dot(jerk) * z_b)
-          z_b_ddot = (1.0 / u) * (snap - (snap.dot(z_b) + jerk.dot(z_b_dot)) * z_b - 2 * jerk.dot(z_b) * z_b_dot)
+
+          u_dot = z_b.dot(jerk + drag_dist_control * accel)
+          z_b_dot  = (1.0 / u) * (jerk - u_dot * z_b + drag_dist_control * accel)
+
+          u_ddot = snap.dot(z_b) + u * z_b_dot.dot(z_b_dot) + drag_dist_control * jerk.dot(z_b)
+          z_b_ddot = (1.0 / u) * (snap - u_ddot * z_b - 2 * u_dot * z_b_dot + drag_dist_control * jerk)
 
           theta = np.arctan2(-z_b[0], z_b[1])
           angvel = np.cross(z_b, z_b_dot)

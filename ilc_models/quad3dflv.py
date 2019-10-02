@@ -277,12 +277,12 @@ class Quad3DFLV(Quad3DFL):
     udot = self.int_udot
 
     if self.model_drag:
-      DRAG_DIST_CONTROL = self.drag_dist
+      drag_dist_control = self.drag_dist
     else:
-      DRAG_DIST_CONTROL = 0
+      drag_dist_control = 0
 
-    start_acc = u * z_b_act - g3 - DRAG_DIST_CONTROL * vel
-    start_jerk = u * z_b_dot_act + udot * z_b_act - DRAG_DIST_CONTROL * start_acc
+    start_acc = u * z_b_act - g3 - drag_dist_control * vel
+    start_jerk = u * z_b_dot_act + udot * z_b_act - drag_dist_control * start_acc
 
     self.z = z_b_act
     self.acc = start_acc
@@ -302,11 +302,11 @@ class Quad3DFLV(Quad3DFL):
 
     self.snap = snap
 
-    v1 = snap.dot(z_b_act) + u * z_b_dot_act.dot(z_b_dot_act) + DRAG_DIST_CONTROL * start_jerk.dot(z_b_act) + u_ff
+    v1 = snap.dot(z_b_act) + u * z_b_dot_act.dot(z_b_dot_act) + drag_dist_control * start_jerk.dot(z_b_act) + u_ff
 
     self.v1 = v1
 
-    z_ddot = (1 / u) * (snap - v1 * z_b_act - 2 * udot * z_b_dot_act + DRAG_DIST_CONTROL * start_jerk)
+    z_ddot = (1 / u) * (snap - v1 * z_b_act - 2 * udot * z_b_dot_act + drag_dist_control * start_jerk)
 
     # TODO: How proper is this for x and y motion? And yaw motion?
     ang_acc_body = np.cross(z_b_act, z_ddot) + angaccel_des

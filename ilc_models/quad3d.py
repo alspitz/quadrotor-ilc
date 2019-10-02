@@ -258,7 +258,6 @@ class Quad3D(ILCBase):
         print("WARNING: Ang accel is very high!")
         ang_accel_world = np.clip(ang_accel_world, -ang_accel_limit, ang_accel_limit)
 
-
       acc = self.thrust_dist * u * rot.apply(np.array((0, 0, 1))) - g3 - self.drag_dist * vel
 
       pos += vel * dt
@@ -289,8 +288,13 @@ class Quad3D(ILCBase):
 
     pos_vel_error = pos_vel - np.hstack((pos_des, vel_des))
 
+    if self.model_drag:
+      drag_dist_control = self.drag_dist
+    else:
+      drag_dist_control = 0
+
     # Position Control
-    accel_des = -self.K_pos.dot(pos_vel_error) + acc_des
+    accel_des = -self.K_pos.dot(pos_vel_error) + acc_des + drag_dist_control * pos_vel[3:]
 
     # Reference Conversion
     euler_des = accel_to_euler_rpy(accel_des, g)
