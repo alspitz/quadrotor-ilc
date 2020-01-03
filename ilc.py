@@ -36,12 +36,12 @@ if __name__  == "__main__":
     '3ddediv':     (quad3dflv.Quad3DFLV, 3),
   }
 
-  parser = argparse.ArgumentParser()
+  parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("--system", type=str, default="simple", choices=system_map.keys(), help="Type of system to simulate.")
   parser.add_argument("--trials", type=int, default=4, help="Number of ILC trials to run.")
   parser.add_argument("--alpha", type=float, default=1.0, help="Percentage of update (0 - 1) to use at each iteration. Lower values increase stability.")
   parser.add_argument("--dt", type=float, default=0.02, help="Size of timestep along trajectory.")
-  parser.add_argument("--feedback", default=False, action='store_true', help="Apply feedback along the trajectory.")
+  parser.add_argument("--feedback", "--fb", default=False, action='store_true', help="Apply feedback along the trajectory.")
   parser.add_argument("--noise", default=False, action='store_true', help="Add noise to the position errors fed into ILC.")
   parser.add_argument("--noise-stddev", default=1e-3, type=float, help="Stddev of noise added to the position errors")
   parser.add_argument("--filter", default=False, action='store_true', help="Filter the position errors fed into ILC.")
