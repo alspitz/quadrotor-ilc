@@ -4,8 +4,10 @@ g = 9.81
 g2 = np.array((0, g))
 g3 = np.array((0, 0, g))
 
-class ILCBase:
+class ILCBase(object):
   control_normalization = 1
+  constant_ilc_mats = False
+  saved_ilc = None
 
   def __init__(self, **kwargs):
     self.use_feedback = kwargs['feedback']
@@ -18,16 +20,20 @@ class ILCBase:
     return state
 
   def get_learning_operator(self, dt, states, controls, desired_pos, desired_vel, desired_acc, desired_jerk, desired_snap):
+    assert len(desired_pos) == len(desired_vel) == len(desired_acc) == len(desired_jerk) == len(desired_snap) == len(controls) == len(states)
+
+    if self.constant_ilc_mats and self.saved_ilc is not None:
+      return self.saved_ilc
+
     N = len(states) - 1
-
-    assert len(controls) == N + 1
-
-    calCBpD = np.zeros((N * self.n_out, N * self.n_control))
 
     As = []
     Bs = []
     Cs = []
     Ds = []
+
+    K_xs = []
+    K_us = []
 
     # First we linearize the dynamics around the controls and resulting states.
     for i in range(N + 1):
@@ -38,7 +44,8 @@ class ILCBase:
       else:
         control_ind = i - 1
 
-      state = self.get_ilc_state(state, control_ind)
+      if not self.constant_ilc_mats:
+        state = self.get_ilc_state(state, control_ind)
 
       control = controls[i]
 
@@ -56,10 +63,20 @@ class ILCBase:
       Cs.append(C)
       Ds.append(D)
 
+      K_x, K_u = self.get_feedback_response(state, control, dt)
+
+      K_xs.append(K_x)
+      K_us.append(K_u)
+
       # TODO: Use D
       assert np.all(D == 0)
 
+    calCBpD = np.zeros((N * self.n_out, N * self.n_control))
+    G = np.zeros((N * self.n_control, N * self.n_control))
+
     Apowers = [np.eye(self.n_state) for _ in range(N)]
+    last_Apowers = np.array(Apowers).copy()
+    last2_Apowers = np.array(Apowers).copy()
     for i in range(N):
       for j in range(N - i):
         row_ind = i + j
@@ -68,7 +85,20 @@ class ILCBase:
         calCBpD[self.n_out *     row_ind : self.n_out * (row_ind + 1),
                 self.n_control * col_ind : self.n_control * (col_ind + 1)] = Cs[row_ind + 1].dot(Apowers[j].dot(Bs[col_ind]))
 
+        if row_ind >= col_ind + 1:
+          G[self.n_control * row_ind : self.n_control * (row_ind + 1),
+            self.n_control * col_ind : self.n_control * (col_ind + 1)] = K_xs[row_ind].dot(last_Apowers[j].dot(Bs[col_ind + 1]))
+        elif row_ind == col_ind:
+          G[self.n_control * row_ind : self.n_control * (row_ind + 1),
+            self.n_control * col_ind : self.n_control * (col_ind + 1)] = K_us[row_ind]
+
+        last2_Apowers = last_Apowers.copy()
+        last_Apowers[j] = Apowers[j]
         Apowers[j] = As[row_ind + 1].dot(Apowers[j])
+
       #calCBpD[self.n_out * i : self.n_out * (i + 1), self.n_control * i : self.n_control * (i + 1)] += D
 
-    return calCBpD
+    if self.constant_ilc_mats:
+      self.saved_ilc = calCBpD, G
+
+    return calCBpD, G

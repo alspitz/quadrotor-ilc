@@ -10,11 +10,13 @@ class QuadLin(ILCBase):
     om_{t+1} = om_{t} + dt*{-K_att0 * (theta - theta_des) - K_att1 * (om - om_des)}
   """
   n_state = 4
-  n_control = 1
+  n_control = n_control_sys = 1
   n_out = 1
 
-  K_pos = np.array((60, 35))
-  K_att = np.array((200, 60))
+  control_labels = sys_control_labels = ["Snap"]
+
+  K_pos = np.array((6, 3))
+  K_att = np.array((120, 16))
 
   control_normalization = 1e-1
 
@@ -56,7 +58,7 @@ class QuadLin(ILCBase):
 
     return np.array(xs)
 
-  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des):
+  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ilc, **kwargs):
     pos_vel = x[:2]
     theta = x[2]
     angvel = x[3]
@@ -66,6 +68,9 @@ class QuadLin(ILCBase):
 
     theta_err = theta - theta_des
     angvel_error = angvel - angvel_des
-    u_ang_accel = -self.K_att.dot(np.hstack((theta_err, angvel_error))) + angaccel_des
+    u_ang_accel = -self.K_att.dot(np.hstack((theta_err, angvel_error))) + angaccel_des + u_ilc
 
     return np.array((u_ang_accel,))
+
+  def feedforward(self, pos, vel, acc, jerk, snap):
+    return np.hstack((pos, vel, acc, jerk)), np.hstack((snap))

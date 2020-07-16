@@ -101,7 +101,7 @@ class Quad2D(ILCBase):
 
     return A, B, C, D
 
-  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ff, angaccel_ff, **kwargs):
+  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ilc, **kwargs):
     pos_vel = x[:4]
     theta = x[4]
     angvel = x[5]
@@ -115,7 +115,7 @@ class Quad2D(ILCBase):
     angvel_error = angvel - angvel_des
     u_ang_accel = -self.K_att.dot(np.hstack((theta_err, angvel_error))) + angaccel_des
 
-    return np.hstack((a_norm + u_ff, u_ang_accel + angaccel_ff))
+    return np.hstack((a_norm + u_ilc[0], u_ang_accel + u_ilc[1]))
 
   def feedforward(self, pos, vel, acc, jerk, snap):
     acc_vec = acc + g2

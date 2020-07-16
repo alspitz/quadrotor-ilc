@@ -4,8 +4,8 @@ from ilc_models.base import ILCBase
 
 class Trivial(ILCBase):
   """
-    state is vel
-    control is acc
+    state is pos
+    control is vel
 
     x_{t+1} = x_t + dt*(u_t - k_vel (x_t - x_td))
             = x_t + dt*(u_t - k_vel*x_t + k_vel*x_td)
@@ -42,19 +42,33 @@ class Trivial(ILCBase):
     y_{t+1} = CAx + CBu_t + Du_{t+1}
   """
   n_state = 1
-  n_control = 1
+  n_control = n_control_sys = 1
   n_out = 1
 
-  k_vel = 5
+  control_labels = sys_control_labels = ["Vel"]
+
+  k_pos = 100
+
+  def get_feedback_response(self, state, control, dt):
+    K_x = np.zeros((self.n_control_sys, self.n_state))
+    K_u = np.zeros((self.n_control_sys, self.n_control))
+
+    K_x[0, 0] = -self.k_pos
+    K_u[0, 0] = 1
+
+    return K_x, K_u
 
   def get_ABCD(self, state, control, dt):
-    if not self.use_feedback:
-      self.k_vel = 0
-
-    A = np.array(( (1 - dt * self.k_vel,), ))
+    A = np.array(( (1.0,), ))
     B = np.array(( (dt,), ))
-    C = np.array(( (-self.k_vel,), ))
-    D = np.array(( (1,), ))
+    C = np.array(( (1.0,), ))
+    D = np.array(( (0.0,), ))
+
+    if self.use_feedback:
+      K_x, K_u = self.get_feedback_response(state, control, dt)
+      A += B.dot(K_x)
+      B = B.dot(K_u)
+
     return A, B, C, D
 
   def simulate(self, t_end, fun, dt):
@@ -67,5 +81,5 @@ class Trivial(ILCBase):
       xs.append(x)
     return np.array(xs)
 
-  def feedback(self, x, vel_des, acc_des):
-    return np.array( -self.k_vel * (x - vel_des) + acc_des,)
+  def feedback(self, x, pos_des, u_ilc, **kwargs):
+    return np.array( -self.k_pos * (x - 0) + u_ilc,)

@@ -1,11 +1,62 @@
 import numpy as np
 
-import math_utils
+from python_utils import mathu
 
 from scipy.spatial.transform import Rotation
 
 from ilc_models.base import ILCBase, g, g3
 from lqr_gain_match.match_full_state import accel_to_euler_rpy
+from python_utils.rigid_body_lie import RigidBody3D
+
+class U_AccelNorm:
+  @staticmethod
+  def u(a, z):
+    return np.linalg.norm(a)
+
+  @staticmethod
+  def duda(a, z):
+    return a / U_AccelNorm.u(a, z)
+
+  @staticmethod
+  def dudz(a, z):
+    return np.zeros(3)
+
+class U_AccelProj:
+  @staticmethod
+  def u(a, z):
+    return a.dot(z)
+
+  @staticmethod
+  def duda(a, z):
+    return z.copy()
+
+  @staticmethod
+  def dudz(a, z):
+    return a.copy()
+
+class U_AccelZPri:
+  @staticmethod
+  def u(a, z):
+    return a[2] / z[2]
+
+  @staticmethod
+  def duda(a, z):
+    return np.array((0, 0, 1 / z[2]))
+
+  @staticmethod
+  def dudz(a, z):
+    return np.array((0, 0, -a[2] / (z[2] ** 2)))
+
+class Delay:
+  """
+     v dot = - tau * (v - v_des)
+  """
+  def __init__(self, tau, v):
+    self.tau = tau
+    self.v = v
+
+  def step(self, dt, v_des):
+    self.v += -self.tau * (self.v - v_des) * dt
 
 class Quad3D(ILCBase):
   """
@@ -20,6 +71,8 @@ class Quad3D(ILCBase):
   n_state = 12
   n_control = 4
   n_out = 3
+
+  n_control_sys = 4
 
   state_labels = [
     "Position X",
@@ -43,21 +96,35 @@ class Quad3D(ILCBase):
     "Yaw Accel"
   ]
 
+  sys_control_labels = [
+    "Thrust",
+    "Roll Accel",
+    "Pitch Accel",
+    "Yaw Accel"
+  ]
+
   g_vec = g3
 
   K_pos = np.array((
-    (7.0, 0, 0, 4.0, 0, 0),
-    (0, 7.0, 0, 0, 4.0, 0),
-    (0, 0, 7.0, 0, 0, 4.0)
+    #(8.0, 0, 0, 6.0, 0, 0),
+    #(0, 8.0, 0, 0, 6.0, 0),
+    (5.47368, 0, 0, 3.15789, 0, 0),
+    (0, 5.47368, 0, 0, 3.15789, 0),
+    (0, 0, 5.47368, 0, 0, 3.15789)
   ))
 
+  #K_att = np.array((
+  #  (120, 0, 0, 16, 0, 0),
+  #  (0, 120, 0, 0, 16, 0),
+  #  (0, 0, 60, 0, 0, 12)
+  #))
   K_att = np.array((
-    (120, 0, 0, 16, 0, 0),
-    (0, 120, 0, 0, 16, 0),
-    (0, 0, 60, 0, 0, 12)
+    (190, 0, 0, 25, 0, 0),
+    (0, 190, 0, 0, 25, 0),
+    (0, 0, 30, 0, 0, 3)
   ))
 
-  control_normalization = np.array((1e-1, 1e-2, 1e-2, 1e-2))
+  control_normalization = np.array((0.1, 1e-2, 1e-2, 1e-2))
 
   def __init__(self, **kwargs):
     ILCBase.__init__(self, **kwargs)
@@ -65,8 +132,44 @@ class Quad3D(ILCBase):
     self.model_drag = kwargs['model_drag']
     self.drag_dist = kwargs['drag_dist']
     self.thrust_dist = kwargs['thrust_dist']
+    self.angaccel_dist = kwargs['angaccel_dist']
+    self.periodic_accel_dist_mag = kwargs['periodic_accel_dist_mag']
+    self.periodic_accel_dist_periods = kwargs['periodic_accel_dist_periods']
 
-  def get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des):
+    self.delay_control = kwargs['delay_control']
+    self.delay_timeconstant = kwargs['delay_timeconstant']
+    self.positive_thrust_only = kwargs['positive_thrust_only']
+    self.accel_limit = kwargs['accel_limit']
+    self.angaccel_limit = kwargs['angaccel_limit']
+
+    ttype = kwargs['cascaded_thrust']
+    if ttype == 'norm':
+      self.U = U_AccelNorm
+    elif ttype == 'project':
+      self.U = U_AccelProj
+    elif ttype == "maintain-z":
+      self.U = U_AccelZPri
+    else:
+      assert False
+
+    self.mixer = np.array((
+      (0.25, 0.25, 0.25, 0.25),
+      (-0.25, 0.25, 0.25, -0.25),
+      (-0.25, 0.25, -0.25, 0.25),
+      (-0.25, -0.25, 0.25, 0.25)
+    ))
+
+    # To ensure rotor forces are always positive!
+    self.mixer[0, :] /= 40
+
+    self.mixer_true = self.mixer.copy()
+
+    if kwargs['limit_motor']:
+      self.mixer_true[:, kwargs['limit_motor_ind']] *= kwargs['limit_motor_scale']
+
+    self.mixer_inv = np.linalg.inv(self.mixer)
+
+  def get_feedback_response(self, state, control, dt):
     X = slice(0, 3)
     V = slice(3, 6)
     RPY = slice(6, 9)
@@ -90,35 +193,54 @@ class Quad3D(ILCBase):
       (-np.cos(pitch) * np.sin(roll), -np.sin(pitch) * np.cos(roll), 0)
     ))
 
-    skew_z = math_utils.skew_matrix(z)
+    skew_z = mathu.skew_matrix(z)
 
     pos_vel = state[:6]
-    accel_des = -self.K_pos.dot(pos_vel - np.hstack((pos_des, vel_des))) + acc_des + g3
-    adota = accel_des.T.dot(accel_des)
-    u = np.sqrt(adota)
+    accel_des = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g3
+    anorm = np.linalg.norm(accel_des)
 
     K_x = np.zeros((self.n_control, self.n_state))
-
-    adir = accel_des / u
 
     dadx = -self.K_pos[:, X]
     dadv = -self.K_pos[:, V]
 
-    dudx = adir.dot(dadx)
-    dudv = adir.dot(dadv)
+    duda = self.U.duda(accel_des, z)
+    dudz = self.U.dudz(accel_des, z)
+
+    dudx = duda.dot(dadx)
+    dudv = duda.dot(dadv)
 
     K_x[U, X] = dudx
     K_x[U, V] = dudv
 
-    dzdx = (u * dadx - np.outer(accel_des, dudx)) / adota
-    dzdv = (u * dadv - np.outer(accel_des, dudv)) / adota
+    K_x[U, RPY] = dudz.dot(dzdrpy)
 
-    z = adir
+    z_des = accel_des / anorm
+
+    dzda = (1.0 / anorm) * (np.eye(3) - np.outer(z_des, z_des))
+    dzdx = dzda.dot(dadx)
+    dzdv = dzda.dot(dadv)
+
+    # We assume yaw is zero
+    #assert abs(rpy[2]) < 1e-6
+
     deulerdz = np.zeros((3, 3))
-    a1 = 1 / np.sqrt(1 - z[1] ** 2)
+    a1 = 1 / np.sqrt(1 - z_des[1] ** 2)
     deulerdz[0, 1] = -a1
-    deulerdz[1, 0] = 1 / np.sqrt(1 - (z[0] * a1) ** 2)
-    deulerdz[1, 1] = z[0] * z[1] / (np.sqrt(1 - (z[0] * a1) ** 2) * ((1 - z[1]**2) ** (3/2)))
+    deulerdz[1, 0] = 1 / np.sqrt(1 - (z_des[0] * a1) ** 2)
+    deulerdz[1, 1] = z_des[0] * z_des[1] / (np.sqrt(1 - (z_des[0] * a1) ** 2) * ((1 - z_des[1]**2) ** (3.0/2)))
+
+    #des_phi = np.arcsin(-z_des[1])
+    #des_th = np.arctan2(z_des[0], z_des[2])
+    #print(dzdrpy)
+    #print(deulerdz)
+    #print(-1 / np.cos(des_phi))
+    #print(1 / (1 + np.tan(des_th)**2))
+    #input()
+
+    #deulerdz[0, 1] = -1 / np.cos(des_phi)
+    #deulerdz[1, 0] = 1 / (1 + np.tan(des_th) ** 2)
+    #deulerdz[1, 1] = deulerdz[1, 0] * (-z_des[0] / (z_des[2] ** 2))
 
     K_x[AA, X] = self.K_att[:, :3].dot(deulerdz.dot(dzdx))
     K_x[AA, V] = self.K_att[:, :3].dot(deulerdz.dot(dzdv))
@@ -126,7 +248,11 @@ class Quad3D(ILCBase):
     K_x[AA, RPY] = -self.K_att[:, :3]
     K_x[AA, OM] = -self.K_att[:, 3:6]
 
-    return K_x
+    K_u = np.zeros((self.n_control, self.n_control))
+    K_u[U, U] = 1
+    K_u[AA, AA] = np.eye(3)
+
+    return K_x, K_u
 
   def get_ABCD(self, state, control, dt):
     X = slice(0, 3)
@@ -146,8 +272,7 @@ class Quad3D(ILCBase):
     else:
       pos_vel = state[:6]
       accel_des = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g3
-      adota = accel_des.T.dot(accel_des)
-      u = np.sqrt(adota)
+      u = self.U.u(accel_des, z)
 
     roll, pitch, yaw = rpy
 
@@ -189,11 +314,7 @@ class Quad3D(ILCBase):
     C[X, X] = np.eye(3)
 
     if self.use_feedback:
-      K_x = self.get_feedback_response(state, self.pos_des, self.vel_des, self.acc_des, self.jerk_des, self.snap_des)
-
-      K_u = np.zeros((self.n_control, self.n_control))
-      K_u[U, U] = 1
-      K_u[AA, AA] = np.eye(3)
+      K_x, K_u = self.get_feedback_response(state, control, dt)
 
       A = A + B.dot(K_x)
       B = B.dot(K_u)
@@ -231,57 +352,89 @@ class Quad3D(ILCBase):
     return state, control
 
   def simulate(self, t_end, fun, dt):
-    pos = np.zeros(3)
-    vel = np.zeros(3)
-    rpy = np.zeros(3)
-    rot = Rotation.from_euler('ZYX', rpy[::-1])
-    quat = rot.as_quat()
-    ang_body = np.zeros(3)
-    ang_world = rot.apply(ang_body)
+    from random import gauss
+    vec = np.array([gauss(0, 1) for i in range(3)])
+    pos = vec * 0.02 / np.linalg.norm(vec)
+    vec = np.array([gauss(0, 1) for i in range(3)])
+    vel = vec * 0.05 / np.linalg.norm(vec)
+
+    #pos = np.array((0.00, -0.02, 0.00))
+    #vel = np.array((0.00, -0.05, 0.00))
+
+    pos *= 0
+    vel *= 0
+
+    rot = Rotation.from_euler('ZYX', np.zeros(3))
+    rigid_body = RigidBody3D(pos=pos, vel=vel, quat=np.array((1.0, 0, 0, 0)), ang=np.zeros(3))
 
     x = np.zeros(12)
     xs = [x.copy()]
 
+    delay = Delay(self.delay_timeconstant, np.zeros(4))
+
     for i in range(int(round(t_end / dt))):
+      time = i * dt
+
       u_out = fun(x)
 
-      u = u_out[0]
-      ang_accel_body = np.array((u_out[1], u_out[2], u_out[3]))
-      ang_accel_world = rot.apply(ang_accel_body)
+      if self.delay_control:
+        if not i:
+          delay.v = u_out
 
-      if u < 0:
-        u = 0
+        u_delayed = delay.v.copy()
+        delay.step(dt, u_out)
+
+      else:
+        u_delayed = u_out.copy()
+
+      rotor_forces = self.mixer_inv.dot(u_delayed)
+      u_mixed = self.mixer_true.dot(rotor_forces)
+
+      u_use, aa_use = u_mixed[0], u_mixed[1:]
+
+      if np.any(np.abs(aa_use) > self.angaccel_limit):
+        print("WARNING: Ang accel is very high! (%s; limit %f)" % (aa_use, self.angaccel_limit))
+        aa_use = np.clip(aa_use, -self.angaccel_limit, self.angaccel_limit)
+
+      if abs(u_use) > self.accel_limit:
+        print("WARNING: Accel is very high! (%f; limit %f)" % (u_use, self.accel_limit))
+        u_use = np.clip(u_use, -self.accel_limit, self.accel_limit)
+
+      if self.positive_thrust_only and u_use < 0:
+        u_use = 0
         print("WARNING: THRUST IS NEGATIVE")
 
-      ang_accel_limit = 500
-      if np.any(np.abs(ang_accel_world) > ang_accel_limit):
-        print("WARNING: Ang accel is very high!")
-        ang_accel_world = np.clip(ang_accel_world, -ang_accel_limit, ang_accel_limit)
+      vel = rigid_body.get_vel()
+      acc = self.thrust_dist * u_use * rot.apply(np.array((0, 0, 1))) - g3 - self.drag_dist * vel
 
-      acc = self.thrust_dist * u * rot.apply(np.array((0, 0, 1))) - g3 - self.drag_dist * vel
+      if abs(self.periodic_accel_dist_mag) > 1e-6:
+        acc += self.periodic_accel_dist_mag * np.sin(2 * np.pi * self.periodic_accel_dist_periods * time)
 
-      pos += vel * dt
-      vel += acc * dt
+      aa_use *= self.angaccel_dist
 
-      quat_wfirst = np.array((quat[3], quat[0], quat[1], quat[2]))
+      aa_use[2] = 0
 
-      quat_deriv = math_utils.quat_mult(math_utils.vector_quat(ang_world), quat_wfirst) / 2.0
-      quat_wfirst += quat_deriv * dt
-      quat_wfirst /= np.linalg.norm(quat_wfirst)
+      ang_accel_world = rot.apply(aa_use)
 
-      ang_world += ang_accel_world * dt
-      quat = np.array((quat_wfirst[1], quat_wfirst[2], quat_wfirst[3], quat_wfirst[0]))
-      rot = Rotation.from_quat(quat)
-      rpy = rot.as_euler('ZYX')[::-1]
-      ang_body = rot.inv().apply(ang_world)
+      rigid_body.step(dt, acc, ang_accel_world)
 
-      x = np.hstack((pos.copy(), vel.copy(), rpy.copy(), ang_body.copy()))
+      if np.any(np.abs(rigid_body.ang) > 10000):
+        rigid_body.ang = np.clip(rigid_body.ang, -10000, 10000)
+        print("WARNING: Clipping vehicle ang. vel.")
+
+      if np.any(np.abs(rigid_body.vel) > 100):
+        rigid_body.vel = np.clip(rigid_body.vel, -100, 100)
+        print("WARNING: Clipping vehicle velocity")
+
+      rot = Rotation.from_dcm(rigid_body.get_rot())
+
+      x = np.hstack((rigid_body.get_pos(), rigid_body.get_vel(), rot.as_euler('ZYX')[::-1], rot.inv().apply(rigid_body.get_ang())))
 
       xs.append(x)
 
     return np.array(xs)
 
-  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ff, angaccel_ff, **kwargs):
+  def feedback(self, x, pos_des, vel_des, acc_des, angvel_des, angaccel_des, u_ilc, **kwargs):
     pos_vel = x[:6]
     rpy = x[6:9]
     ang_vel = x[9:]
@@ -299,8 +452,11 @@ class Quad3D(ILCBase):
     # Reference Conversion
     euler_des = accel_to_euler_rpy(accel_des, g)
     rot = Rotation.from_euler('ZYX', rpy[::-1])
-    #u_accel = rot.inv().apply(accel_des)[2]
-    u_accel = np.linalg.norm(accel_des + g3)
+
+    z_b = rot.apply(np.array((0, 0, 1)))
+
+    accel_des_vec = accel_des + g3
+    u_accel = self.U.u(accel_des_vec, z_b)
 
     # Attitude Control
     euler_error = rpy - euler_des
@@ -308,4 +464,4 @@ class Quad3D(ILCBase):
     euler_angvel = np.hstack((euler_error, angvel_error))
     u_ang_accel = -self.K_att.dot(euler_angvel) + angaccel_des
 
-    return np.hstack((u_accel + u_ff, u_ang_accel + angaccel_ff))
+    return np.hstack((u_accel + u_ilc[0], u_ang_accel + u_ilc[1:]))

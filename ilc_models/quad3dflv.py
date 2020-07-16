@@ -1,11 +1,16 @@
 import numpy as np
 
-import math_utils
+from python_utils import mathu
 
 from scipy.spatial.transform import Rotation
 
 from ilc_models.base import g, g3
 from ilc_models.quad3dfl import Quad3DFL
+
+K1 = 1040
+K2 = 600
+K3 = 190
+K4 = 25
 
 class Quad3DFLV(Quad3DFL):
   """ This system is augmented with the two virtual control integrators
@@ -40,9 +45,9 @@ class Quad3DFLV(Quad3DFL):
   ]
 
 
-  control_normalization = np.array((1e-4, 1e-2, 1e-2, 1e-2))
+  control_normalization = np.array((1e-3, 1e-2, 1e-2, 1e-2))
 
-  def get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des):
+  def get_feedback_response(self, state, control, dt):
     X = slice(0, 3)
     V = slice(3, 6)
     RPY = slice(6, 9)
@@ -68,17 +73,18 @@ class Quad3DFLV(Quad3DFL):
       (-np.cos(pitch) * np.sin(roll), -np.sin(pitch) * np.cos(roll), 0)
     ))
 
-    skew_z = math_utils.skew_matrix(z)
+    skew_z = mathu.skew_matrix(z)
 
-    skew_angvel_w = math_utils.skew_matrix(rot.apply(angvel))
+    skew_angvel_w = mathu.skew_matrix(rot.apply(angvel))
     z_dot = skew_angvel_w.dot(z)
 
-    u, udot = self.int_u, self.int_udot
+    #u, udot = self.int_u, self.int_udot
+    u, udot = state[Z1][0], state[Z2][0]
 
-    k1 = 840 * np.eye(3) / self.duration ** 4
-    k2 = 480 * np.eye(3) / self.duration ** 3
-    k3 = 120 * np.eye(3) / self.duration ** 2
-    k4 = 16 * np.eye(3) / self.duration ** 1
+    k1 = K1 * np.eye(3) / self.duration ** 4
+    k2 = K2 * np.eye(3) / self.duration ** 3
+    k3 = K3 * np.eye(3) / self.duration ** 2
+    k4 = K4 * np.eye(3) / self.duration ** 1
 
     dsdu = -k3.dot(z) - k4.dot(z_dot)
     dv1du = dsdu.T.dot(z) + z_dot.T.dot(z_dot)
@@ -86,31 +92,33 @@ class Quad3DFLV(Quad3DFL):
     dsdudot = -k4.dot(z)
     dv1dudot = dsdudot.T.dot(z)
 
-    K_x = np.zeros((self.n_control, self.n_state))
+    K_x = np.zeros((self.n_control_sys, self.n_state))
 
     K_x[V1, X] = -k1.T.dot(z)
     K_x[V1, V] = -k2.T.dot(z)
     K_x[V1, Z1] = dv1du
     K_x[V1, Z2] = dv1dudot
 
-    fb_resp = Quad3DFL.get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des)
+    self.int_u = u
+    self.int_udot = udot
+    fb_resp, K_u_old = Quad3DFL.get_feedback_response(self, state, control, dt, nou=True)
 
     K_x[AA, X] = fb_resp[AA, X]
     K_x[AA, V] = fb_resp[AA, V]
     K_x[AA, RPY] = fb_resp[AA, RPY]
     K_x[AA, OM] = fb_resp[AA, OM]
 
-    skew_z = math_utils.skew_matrix(z)
+    skew_z = mathu.skew_matrix(z)
 
     dzdotdang = -skew_z.dot(rot.as_dcm())
 
     start_acc = u * z - g3
     start_jerk = u * z_dot + udot * z
 
-    pos_err = pos - pos_des
-    vel_err = vel - vel_des
-    acc_err = start_acc - acc_des
-    jerk_err = start_jerk - jerk_des
+    pos_err = pos - self.pos_des
+    vel_err = vel - self.vel_des
+    acc_err = start_acc - self.acc_des
+    jerk_err = start_jerk - self.jerk_des
 
     dzdotdrpy = skew_angvel_w.dot(dzdrpy)
 
@@ -119,7 +127,7 @@ class Quad3DFLV(Quad3DFL):
 
     dsnapdrpy = -k3.dot(daccdrpy) - k4.dot(djerkdrpy)
 
-    snap = -k1.dot(pos_err) - k2.dot(vel_err) - k3.dot(acc_err) - k4.dot(jerk_err) + snap_des
+    snap = -k1.dot(pos_err) - k2.dot(vel_err) - k3.dot(acc_err) - k4.dot(jerk_err) + self.snap_des
     dv1drpy = dsnapdrpy.T.dot(z) + snap.dot(dzdrpy) + 2 * u * z_dot.T.dot(dzdotdrpy)
 
     #print(snap, z)
@@ -135,17 +143,23 @@ class Quad3DFLV(Quad3DFL):
     K_x[V1, RPY] = dv1drpy
     K_x[V1, OM] = dv1dang
 
-    v1 = snap.dot(z) + u * z_dot.dot(z_dot)
-    dzddotdu = (1.0 / u) * (dsdu - dv1du * z) - (1.0 / u ** 2) * (snap - v1 * z - 2 * udot * z_dot)
+    dzddotdu = (1.0 / u) * (dsdu - dv1du * z) - (1.0 / u ** 2) * (snap - 2 * udot * z_dot)
     dalphadu = rot.inv().apply(skew_z.dot(dzddotdu))
 
-    dzddotdudot = (1.0 / u) * (dsdudot - dv1dudot * z - 2 * z_dot)
+    dzddotdudot = (1.0 / u) * (dsdudot - 2 * z_dot)
     dalphadudot = rot.inv().apply(skew_z.dot(dzddotdudot))
 
     K_x[AA, Z1] = np.array([dalphadu]).T
     K_x[AA, Z2] = np.array([dalphadudot]).T
 
-    return K_x
+    # TODO XXX Should the below be d u / d uddot ??????????? i.e. 0?! Try this
+    K_u = np.zeros((self.n_control_sys, self.n_control))
+    #K_u[0, 2] = 1
+    #K_u[1, 1] = -1.0 / u
+    #K_u[2, 0] = 1.0 / u
+    #K_u[AA, AA] = np.eye(3)
+
+    return K_x, K_u
 
   def get_ABCD(self, state, control, dt):
     X = slice(0, 3)
@@ -219,14 +233,10 @@ class Quad3DFLV(Quad3DFL):
       self.int_u = u
       self.int_udot = udot
 
-      K_x = self.get_feedback_response(state, self.pos_des, self.vel_des, self.acc_des, self.jerk_des, self.snap_des)
+      K_x, K_u = self.get_feedback_response(state, control, dt)
 
       self.int_u = oldu
       self.int_udot = oldudot
-
-      K_u = np.zeros((self.n_control, self.n_control))
-      K_u[V1, V1] = 1
-      K_u[AA, AA] = np.eye(3)
 
       A = A + B.dot(K_x)
       B = B.dot(K_u)
@@ -256,7 +266,7 @@ class Quad3DFLV(Quad3DFL):
 
     return state, control
 
-  def feedback(self, x, pos_des, vel_des, acc_des, jerk_des, snap_des, u_ff, angaccel_des, integrate=True):
+  def feedback(self, x, dt, pos_des, vel_des, acc_des, jerk_des, snap_des, u_ilc, integrate=True, **kwargs):
     pos = x[:3]
     vel = x[3:6]
     rpy = x[6:9]
@@ -271,7 +281,8 @@ class Quad3DFLV(Quad3DFL):
     self.y_b_act = rot_m[:, 1]
     self.z_b_act = z_b_act = rot_m[:, 2]
 
-    z_b_dot_act = math_utils.skew_matrix(rot.apply(ang_vel)).dot(z_b_act)
+    ang_world = rot.apply(ang_vel)
+    z_b_dot_act = np.cross(ang_world, z_b_act)
 
     u = self.int_u
     udot = self.int_udot
@@ -292,30 +303,36 @@ class Quad3DFLV(Quad3DFL):
     acc_err = start_acc - acc_des
     jerk_err = start_jerk - jerk_des
 
-    k1 = 840 * np.eye(3) / self.duration ** 4
-    k2 = 480 * np.eye(3) / self.duration ** 3
-    k3 = 120 * np.eye(3) / self.duration ** 2
-    k4 = 16 * np.eye(3) / self.duration ** 1
+    k1 = K1 * np.eye(3) / self.duration ** 4
+    k2 = K2 * np.eye(3) / self.duration ** 3
+    k3 = K3 * np.eye(3) / self.duration ** 2
+    k4 = K4 * np.eye(3) / self.duration ** 1
 
     # Linear controller
     snap = -k1.dot(pos_err) - k2.dot(vel_err) - k3.dot(acc_err) - k4.dot(jerk_err) + snap_des
 
     self.snap = snap
 
-    v1 = snap.dot(z_b_act) + u * z_b_dot_act.dot(z_b_dot_act) + drag_dist_control * start_jerk.dot(z_b_act) + u_ff
+    v1 = snap.dot(z_b_act) + u * z_b_dot_act.dot(z_b_dot_act) + drag_dist_control * start_jerk.dot(z_b_act) + u_ilc[0]
 
     self.v1 = v1
 
-    z_ddot = (1 / u) * (snap - v1 * z_b_act - 2 * udot * z_b_dot_act + drag_dist_control * start_jerk)
+    # approx. thrust delay
+    #self.int_udot = 0.065 * (snap.dot(z_b_act) + u * z_b_dot_act.dot(z_b_dot_act))
 
-    # TODO: How proper is this for x and y motion? And yaw motion?
-    ang_acc_body = np.cross(z_b_act, z_ddot) + angaccel_des
+    udot = self.int_udot
+
+    # Here we don't include v1 * z_b_act, because when crossed with Z, this term is zero.
+    z_ddot = (1 / u) * (snap - 2 * udot * z_b_dot_act + drag_dist_control * start_jerk)
+
+    ang_acc_world = np.cross(z_b_act, z_ddot) - (ang_world.dot(z_b_act)) * np.cross(z_b_act, ang_world)
+    ang_acc_body = rot.inv().apply(ang_acc_world) + u_ilc[1:]
 
     u_ret = self.int_u
 
     if integrate:
-      self.int_u += self.int_udot * self.dt + 0.5 * v1 * self.dt ** 2
-      self.int_udot += v1 * self.dt
+      self.int_u += self.int_udot * dt
+      self.int_udot += v1 * dt
 
     control = np.hstack((u_ret, ang_acc_body))
     return control

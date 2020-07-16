@@ -1,6 +1,6 @@
 import numpy as np
 
-import math_utils
+from python_utils import mathu
 
 from scipy.spatial.transform import Rotation
 
@@ -15,14 +15,13 @@ class Quad3DFL(Quad3D):
   def __init__(self, **kwargs):
     Quad3D.__init__(self, **kwargs)
 
-    self.dt = kwargs['dt']
-
   def reset(self):
     self.int_u = g
+    self.int_c = g
     self.int_dot = 0
     self.zs = []
 
-  def get_feedback_response(self, state, pos_des, vel_des, acc_des, jerk_des, snap_des):
+  def get_feedback_response(self, state, control, dt, nou=False):
     X = slice(0, 3)
     V = slice(3, 6)
     RPY = slice(6, 9)
@@ -38,9 +37,9 @@ class Quad3DFL(Quad3D):
     rot = Rotation.from_euler('ZYX', rpy[::-1])
     z = rot.apply(np.array((0, 0, 1)))
 
-    skew_z = math_utils.skew_matrix(z)
+    skew_z = mathu.skew_matrix(z)
 
-    skew_angvel_w = math_utils.skew_matrix(rot.apply(angvel))
+    skew_angvel_w = mathu.skew_matrix(rot.apply(angvel))
     z_dot = skew_angvel_w.dot(z)
 
     roll, pitch, yaw = rpy
@@ -65,17 +64,17 @@ class Quad3DFL(Quad3D):
     start_acc = u * z - g3
     start_jerk = u * z_dot + udot * z
 
-    pos_err = pos - pos_des
-    vel_err = vel - vel_des
-    acc_err = start_acc - acc_des
-    jerk_err = start_jerk - jerk_des
+    pos_err = pos - self.pos_des
+    vel_err = vel - self.vel_des
+    acc_err = start_acc - self.acc_des
+    jerk_err = start_jerk - self.jerk_des
 
     djerkdrpy = u * dzdotdrpy + udot * dzdrpy
     daccdrpy = u * dzdrpy
 
     dsnapdrpy = -k3.dot(daccdrpy) - k4.dot(djerkdrpy)
 
-    snap = -k1.dot(pos_err) - k2.dot(vel_err) - k3.dot(acc_err) - k4.dot(jerk_err) + snap_des
+    snap = -k1.dot(pos_err) - k2.dot(vel_err) - k3.dot(acc_err) - k4.dot(jerk_err) + self.snap_des
     dv1drpy = dsnapdrpy.T.dot(z) + snap.dot(dzdrpy) + 2 * u * z_dot.T.dot(dzdotdrpy)
 
     v1 = snap.dot(z) + u * z_dot.dot(z_dot)
@@ -85,7 +84,7 @@ class Quad3DFL(Quad3D):
 
     dzddotdrpy = u_factor * ( dsnapdrpy - np.outer(dv1drpy, z) - v1 * dzdrpy - 2 * udot * dzdotdrpy)
 
-    dalphadrpy = skew_z.dot(dzddotdrpy - skew_angvel_w.dot(dzdotdrpy)) - math_utils.skew_matrix(z_ddot - skew_angvel_w.dot(z_dot)).dot(dzdrpy)
+    dalphadrpy = skew_z.dot(dzddotdrpy - skew_angvel_w.dot(dzdotdrpy)) - mathu.skew_matrix(z_ddot - skew_angvel_w.dot(z_dot)).dot(dzdrpy)
 
     djerkdang = u * dzdotdang
     dsnapdang = -k4.dot(djerkdang)
@@ -107,12 +106,18 @@ class Quad3DFL(Quad3D):
     dalphadpos = skew_z.dot(dzddotdpos)
     dalphadvel = skew_z.dot(dzddotdvel)
 
-    fb_resp = np.zeros((self.n_control, self.n_state))
-    fb_resp[AA, RPY] = dalphadrpy
-    fb_resp[AA, OM] = dalphabdang
-    fb_resp[AA, X] = dalphadpos
-    fb_resp[AA, V] = dalphadvel
-    return fb_resp
+    K_x = np.zeros((self.n_control_sys, self.n_state))
+    K_x[AA, RPY] = dalphadrpy
+    K_x[AA, OM] = dalphabdang
+    K_x[AA, X] = dalphadpos
+    K_x[AA, V] = dalphadvel
+
+    K_u = np.zeros((self.n_control_sys, self.n_control))
+    if not nou:
+      K_u[U, U] = 1
+      K_u[AA, AA] = np.eye(3)
+
+    return K_x, K_u
 
   def get_ABCD(self, state, control, dt):
     X = slice(0, 3)
@@ -133,7 +138,7 @@ class Quad3DFL(Quad3D):
     rot = Rotation.from_euler('ZYX', rpy[::-1])
     z = rot.apply(np.array((0, 0, 1)))
 
-    z_dot = math_utils.skew_matrix(rot.apply(angvel)).dot(z)
+    z_dot = mathu.skew_matrix(rot.apply(angvel)).dot(z)
 
     roll, pitch, yaw = rpy
 
@@ -158,7 +163,7 @@ class Quad3DFL(Quad3D):
     #A[V, Z] = u * dt * np.eye(3)
     A[V, RPY] = u * dt * dzdrpy
     # TODO Need to fix this because om is in the body frame!
-    #A[Z, OM] = -dt * math_utils.skew_matrix(z)
+    #A[Z, OM] = -dt * mathu.skew_matrix(z)
 
     # Below taken from Tal and Karaman 2018 - Accurate Tracking of ...
     A[RPY, OM] = dt * np.array((
@@ -179,29 +184,23 @@ class Quad3DFL(Quad3D):
     C[X, X] = np.eye(3)
 
     if self.use_feedback:
-      K_x = np.zeros((self.n_control, self.n_state))
-      K_u = np.zeros((self.n_control, self.n_control))
-
       oldu = self.int_u
       oldudot = self.int_udot
 
       self.int_u = u
       self.int_udot = udot
 
-      K_x = self.get_feedback_response(state, self.pos_des, self.vel_des, self.acc_des, self.jerk_des, self.snap_des)
+      K_x, K_u = self.get_feedback_response(state, control, dt)
 
       self.int_u = oldu
       self.int_udot = oldudot
-
-      K_u[U, U] = 1
-      K_u[AA, AA] = np.eye(3)
 
       A = A + B.dot(K_x)
       B = B.dot(K_u)
 
     return A, B, C, D
 
-  def feedback(self, x, pos_des, vel_des, acc_des, jerk_des, snap_des, u_ff, angaccel_ff, integrate=True):
+  def feedback(self, x, dt, pos_des, vel_des, acc_des, jerk_des, snap_des, u_ilc, integrate=True, **kwargs):
     pos = x[:3]
     vel = x[3:6]
     rpy = x[6:9]
@@ -250,13 +249,13 @@ class Quad3DFL(Quad3D):
     angaccel_cross_z = z_ddot - np.cross(ang_vel_w, z_b_dot_act)
 
     ang_acc_world = np.cross(z_b_act, angaccel_cross_z)
-    ang_acc_body = rot.inv().apply(ang_acc_world) + angaccel_ff
+    ang_acc_body = rot.inv().apply(ang_acc_world) + u_ilc[1:]
 
-    u_ret = self.int_u + u_ff
+    u_ret = self.int_u + u_ilc[0]
 
     if integrate:
-      self.int_u += self.int_udot * self.dt + 0.5 * v1 * self.dt ** 2
-      self.int_udot += v1 * self.dt
+      self.int_u += self.int_udot * dt + 0.5 * v1 * dt ** 2
+      self.int_udot += v1 * dt
 
     control = np.hstack((u_ret, ang_acc_body))
     return control
