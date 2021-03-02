@@ -55,7 +55,7 @@ class Quad3DTV(Quad3D):
     z = rot.apply(np.array((0, 0, 1)))
     skew_z = mathu.skew_matrix(z)
 
-    rot_inv = rot.inv().as_dcm()
+    rot_inv = rot.inv().as_matrix()
 
     pos_vel = state[:6]
     accel_des = -self.K_pos.dot(pos_vel - np.hstack((self.pos_des, self.vel_des))) + self.acc_des + g3
@@ -131,7 +131,7 @@ class Quad3DTV(Quad3D):
 
     A[Z, Z] = np.eye(3) + dt * mathu.skew_matrix(ang_world)
     #A[Z, OM] = -dt * mathu.skew_matrix(z).dot(rot.as_matrix())
-    A[Z, OM] = -dt * rot.as_dcm().dot(mathu.skew_matrix(np.array((0, 0, 1))))
+    A[Z, OM] = -dt * rot.as_matrix().dot(mathu.skew_matrix(np.array((0, 0, 1))))
 
     A[OM, OM] = np.eye(3)
 

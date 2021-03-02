@@ -110,7 +110,7 @@ class Quad3DFLV(Quad3DFL):
 
     skew_z = mathu.skew_matrix(z)
 
-    dzdotdang = -skew_z.dot(rot.as_dcm())
+    dzdotdang = -skew_z.dot(rot.as_matrix())
 
     start_acc = u * z - g3
     start_jerk = u * z_dot + udot * z
@@ -276,7 +276,7 @@ class Quad3DFLV(Quad3DFL):
 
     rot = Rotation.from_euler('ZYX', rpy[::-1])
     ang_vel = x[9:]
-    rot_m = rot.as_dcm()
+    rot_m = rot.as_matrix()
     self.x_b_act = rot_m[:, 0]
     self.y_b_act = rot_m[:, 1]
     self.z_b_act = z_b_act = rot_m[:, 2]

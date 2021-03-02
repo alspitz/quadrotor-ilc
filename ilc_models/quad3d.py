@@ -426,7 +426,7 @@ class Quad3D(ILCBase):
         rigid_body.vel = np.clip(rigid_body.vel, -100, 100)
         print("WARNING: Clipping vehicle velocity")
 
-      rot = Rotation.from_dcm(rigid_body.get_rot())
+      rot = Rotation.from_matrix(rigid_body.get_rot())
 
       x = np.hstack((rigid_body.get_pos(), rigid_body.get_vel(), rot.as_euler('ZYX')[::-1], rot.inv().apply(rigid_body.get_ang())))
 

@@ -52,7 +52,7 @@ class Quad3DFL(Quad3D):
 
     dzdotdrpy = skew_angvel_w.dot(dzdrpy)
 
-    dzdotdang = -skew_z.dot(rot.as_dcm())
+    dzdotdang = -skew_z.dot(rot.as_matrix())
 
     u, udot = self.int_u, self.int_udot
 
@@ -210,7 +210,7 @@ class Quad3DFL(Quad3D):
 
     rot = Rotation.from_euler('ZYX', rpy[::-1])
     ang_vel = x[9:]
-    rot_m = rot.as_dcm()
+    rot_m = rot.as_matrix()
     self.x_b_act = rot_m[:, 0]
     self.y_b_act = rot_m[:, 1]
     self.z_b_act = z_b_act = rot_m[:, 2]

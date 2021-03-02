@@ -9,13 +9,12 @@ from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
 from ilc_models import base, trivial, one, quadlin, quadlinpos, nl1d, quad2dlin, quad2d, quad2ddedi, quad2ddedis, quad3d, quad3dtv, quad3dfl, quad3dflv, quad3dfltd, quad3dfls
-from python_utils.polyu import change_poly_duration, deriv_fitting_matrix
+from python_utils.polyu import deriv_fitting_matrix
 
-poly_fit_mat = np.linalg.inv(deriv_fitting_matrix(8))
 
 def get_poly(x, v=0, a=0, j=0, end_pos=1.0, duration=1.0):
+  poly_fit_mat = np.linalg.inv(deriv_fitting_matrix(8, t_end=duration))
   poly = poly_fit_mat.dot(np.array((x, v, a, j, end_pos, 0, 0, 0)))
-  poly = change_poly_duration(poly, duration)
   return poly[::-1]
 
 system_map = {
@@ -104,6 +103,7 @@ def get_parser():
   parser.add_argument("--plot-controls", default=False, action='store_true', help="Plot the final control inputs used.")
   parser.add_argument("--plot-control-corrections", default=False, action='store_true', help="Plot the final ILC control corrections used.")
   parser.add_argument("--plot-updates", default=False, action='store_true', help="Plot the ILC updates after every iteration.")
+  parser.add_argument("--plot-all", default=False, action='store_true', help="Do not skip plotting trials that are all zero.")
 
   # Save Options
   parser.add_argument("--save", default=False, action='store_true', help="Write parameters and trajectories to file.")
@@ -680,14 +680,18 @@ class ILCExperiment(object):
     end_color = np.array((0, 1, 0, 0.5))
 
     def plot_trials(datas, desired, title, ylabel):
+      all_skipped = True
       axes = "XYZ" if DIMS == 3 else "XZ" if DIMS == 2 else "X"
       #for axis in [AXIS]:
       for axis in range(datas[0].shape[1]):
-        for i, trial_data in enumerate(datas):
-          if np.linalg.norm(trial_data[:, axis]) > 1e-8:
-            break
-        else:
-          continue
+        if not args.plot_all:
+          for i, trial_data in enumerate(datas):
+            if np.linalg.norm(trial_data[:, axis]) > 1e-8:
+              break
+          else:
+            continue
+
+        all_skipped = False
 
         title_s = "Actual vs. Desired %s %s" % (title, axes[axis])
         plt.figure(title_s)
@@ -709,6 +713,8 @@ class ILCExperiment(object):
         plt.legend()
         plt.title(title_s)
 
+      if all_skipped:
+        print("WARNING: All trials skipped plotting because nothing interesting happened (pass --plot-all).")
       #plt.savefig("ilc_%s.png" % title.lower())
 
     if args.save:
@@ -833,7 +839,6 @@ class ILCExperiment(object):
             plt.legend()
 
     plt.show()
-    pass
 
 if __name__  == "__main__":
   args = get_parser().parse_args()
